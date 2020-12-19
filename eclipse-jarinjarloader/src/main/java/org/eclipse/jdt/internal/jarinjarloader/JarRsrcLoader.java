@@ -39,7 +39,7 @@ import java.util.jar.Manifest;
  * 
  * @since 3.5
  */
-@SuppressWarnings({ "unchecked", "rawtypes" })
+//@SuppressWarnings({ "unchecked", "rawtypes" })
 public class JarRsrcLoader {
 	private static class ManifestInfo {
 		String rsrcMainClass;
@@ -47,7 +47,7 @@ public class JarRsrcLoader {
 		private Set<String> allFilters = new TreeSet<>();
 		private Map<String, List<String>> libsForFilter = new TreeMap<>();
 
-		final static String CLASS_PATH_FILTER_MATCH_ON = "Class-Path-Filter-Match-On-";
+		static final String CLASS_PATH_FILTER_MATCH_ON = "Class-Path-Filter-Match-On-";
 
 		public void configureConditionalPath(Attributes attrs) {
 			for (Entry<Object, Object> entry : attrs.entrySet()) {
@@ -65,11 +65,10 @@ public class JarRsrcLoader {
 
 		public boolean accept(String library, String actualOsFilter) {
 			boolean notConditionalLibrarySoAcceptIt = true;
-			// debug("analyse " + library);
+			trace("analyse " + library);
 			for (String libFilter : allFilters) {
 				if (library.contains(libFilter)) {
-					// debug("found libFilter=" + libFilter + " but valid for [" + libsForFilter.get(actualOsFilter)
-					// + "]");
+					trace("found libFilter=" + libFilter + " but valid for [" + libsForFilter.get(actualOsFilter) + "]");
 					notConditionalLibrarySoAcceptIt = false;
 					boolean alreadyAccepted = libsForFilter.get(actualOsFilter).contains(libFilter);
 					if (alreadyAccepted)
@@ -80,8 +79,8 @@ public class JarRsrcLoader {
 		}
 	}
 
-	public static void main(String[] args) throws ClassNotFoundException, IllegalArgumentException,
-			IllegalAccessException, InvocationTargetException, SecurityException, NoSuchMethodException, IOException {
+	public static void main(String[] args) throws ClassNotFoundException,
+		IllegalAccessException, InvocationTargetException, NoSuchMethodException, IOException {
 		ManifestInfo mi = readManifestInfo();
 		ClassLoader cl = Thread.currentThread().getContextClassLoader();
 		URL.setURLStreamHandlerFactory(new RsrcURLStreamHandlerFactory(cl));
@@ -98,12 +97,12 @@ public class JarRsrcLoader {
 						+ JIJConstants.JAR_INTERNAL_SEPARATOR);
 		}
 		debug("final classpath "+Arrays.asList(rsrcUrls));
-		ClassLoader jceClassLoader = new URLClassLoader(rsrcUrls, null);
+		ClassLoader jceClassLoader = new URLClassLoader(rsrcUrls, getParentClassLoader());
 		Thread.currentThread().setContextClassLoader(jceClassLoader);
 		try {
-			Class c = Class.forName(mi.rsrcMainClass, true, jceClassLoader);
-			Method main = c.getMethod(JIJConstants.MAIN_METHOD_NAME, new Class[] { args.getClass() });
-			main.invoke((Object) null, new Object[] { args });
+			Class<?> c = Class.forName(mi.rsrcMainClass, true, jceClassLoader);
+			Method main = c.getMethod(JIJConstants.MAIN_METHOD_NAME, args.getClass());
+			main.invoke((Object) null,  (Object[])args);
 		} catch (UnsatisfiedLinkError e) {
 			throw new Error(
 					"The conditional loaded libraries wheren't filtered properly. The initial libs where \n initial=["
@@ -112,39 +111,55 @@ public class JarRsrcLoader {
 		}
 	}
 
+	private static ClassLoader getParentClassLoader() throws InvocationTargetException, IllegalAccessException {
+		// On Java8, it is ok to use a null parent class loader, but, starting with Java 9,
+		// we need to provide one that has access to the restricted list of packages that
+		// otherwise would produce a SecurityException when loaded
+		try {
+			// We use reflection here because the method ClassLoader.getPlatformClassLoader()
+			// is only present starting from Java 9
+			Method platformClassLoader = ClassLoader.class.getMethod("getPlatformClassLoader", (Class[])null); //$NON-NLS-1$
+			return (ClassLoader) platformClassLoader.invoke(null, (Object[]) null);
+		} catch (NoSuchMethodException e) {
+			// This is a safe value to be used on Java 8 and previous versions
+			return null;
+		}
+	}
 	private static ManifestInfo readManifestInfo() throws IOException {
-		Enumeration resEnum;
+		Enumeration<URL> resEnum;
 		resEnum = Thread.currentThread().getContextClassLoader().getResources(JarFile.MANIFEST_NAME);
 		while (resEnum.hasMoreElements()) {
-			try {
-				URL url = (URL) resEnum.nextElement();
-				InputStream is = url.openStream();
-				if (is != null) {
-					debug("reading from " + url);
-					ManifestInfo result = new ManifestInfo();
-					Manifest manifest = new Manifest(is);
-					Attributes mainAttribs = manifest.getMainAttributes();
-					result.rsrcMainClass = mainAttribs.getValue(JIJConstants.REDIRECTED_MAIN_CLASS_MANIFEST_NAME);
-					String rsrcCP = mainAttribs.getValue(JIJConstants.REDIRECTED_CLASS_PATH_MANIFEST_NAME);
-					if (rsrcCP == null)
-						rsrcCP = JIJConstants.DEFAULT_REDIRECTED_CLASSPATH;
-					result.rsrcClassPath = splitSpaces(rsrcCP, ' ');
-					result.configureConditionalPath(mainAttribs);
-					if ((result.rsrcMainClass != null) && !result.rsrcMainClass.trim().equals("")) //$NON-NLS-1$
-						return result;
-				}
-			} catch (Exception e) {
+			URL url = resEnum.nextElement();
+			try (InputStream is = url.openStream()) {
+				debug("reading from " + url);
+				ManifestInfo result = new ManifestInfo();
+				Manifest manifest = new Manifest(is);
+				Attributes mainAttribs = manifest.getMainAttributes();
+				result.rsrcMainClass = mainAttribs.getValue(JIJConstants.REDIRECTED_MAIN_CLASS_MANIFEST_NAME);
+				String rsrcCP = mainAttribs.getValue(JIJConstants.REDIRECTED_CLASS_PATH_MANIFEST_NAME);
+				if (rsrcCP == null)
+					rsrcCP = JIJConstants.DEFAULT_REDIRECTED_CLASSPATH;
+				result.rsrcClassPath = splitSpaces(rsrcCP, ' ');
+				result.configureConditionalPath(mainAttribs);
+				if ((result.rsrcMainClass != null) && !result.rsrcMainClass.trim().equals("")) //$NON-NLS-1$
+					return result;
+			} catch (IOException e) {
 				warn("Wrong manifests on classpath", e);
 			}
 		}
 		System.err.println(
 				"Missing attributes for JarRsrcLoader in Manifest (" + JIJConstants.REDIRECTED_MAIN_CLASS_MANIFEST_NAME //$NON-NLS-1$
 						+ ", " + JIJConstants.REDIRECTED_CLASS_PATH_MANIFEST_NAME + ")"); //$NON-NLS-1$ //$NON-NLS-2$
-		return null;
+		return new ManifestInfo();
 	}
 
+	private static void trace(String message) {
+		if(System.getProperty("eclipse-jarinjarloader.trace")!=null)
+			System.out.println(message);
+	}
 	private static void debug(String message) {
-		System.out.println(message);
+		if(System.getProperty("eclipse-jarinjarloader.debug")!=null)
+			System.out.println(message);
 	}
 	private static void warn(String message, Exception e) {
 		System.err.println(message);
@@ -154,7 +169,6 @@ public class JarRsrcLoader {
 	private static List<String> filter(ManifestInfo mi, List<String> all) {
 		String osName = System.getProperty("os.name").toLowerCase(Locale.US);
 		String osArch = System.getProperty("os.arch").toLowerCase(Locale.US);
-		// String osVersion = System.getProperty("os.version").toLowerCase(Locale.US);
 
 		String libFilter = condition(osName, osArch);
 		debug("accepting only the libraries not matched at all or the ones declared with ["
@@ -185,8 +199,8 @@ public class JarRsrcLoader {
 	 */
 	private static String[] splitSpaces(String line, char separator) {
 		if (line == null)
-			return null;
-		List result = new ArrayList();
+			return new String[] {};
+		List<String> result = new ArrayList<>();
 		int firstPos = 0;
 		while (firstPos < line.length()) {
 			int lastPos = line.indexOf(separator, firstPos);
@@ -197,7 +211,7 @@ public class JarRsrcLoader {
 			}
 			firstPos = lastPos + 1;
 		}
-		return (String[]) result.toArray(new String[result.size()]);
+		return result.toArray(new String[result.size()]);
 	}
 
 }
